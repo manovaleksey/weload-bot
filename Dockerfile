@@ -1,26 +1,24 @@
-FROM node:20-slim
+FROM node:20-bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     python3 \
+    python3-pip \
     curl \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
-    chmod +x /usr/local/bin/yt-dlp
+RUN pip3 install --break-system-packages yt-dlp
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY bot.js ./
 
-# Create bin symlinks so the bot finds the binaries
 RUN mkdir -p bin && \
-    ln -sf /usr/local/bin/yt-dlp bin/yt-dlp && \
-    ln -sf /usr/bin/ffmpeg bin/ffmpeg
+    ln -sf $(which yt-dlp) bin/yt-dlp && \
+    ln -sf $(which ffmpeg) bin/ffmpeg
 
 CMD ["node", "bot.js"]
