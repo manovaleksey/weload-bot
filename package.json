@@ -1,6 +1,6 @@
 {
   "name": "weload-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Weload Telegram bot — download videos from TikTok, YouTube, Pinterest",
   "main": "bot.js",
   "scripts": {
@@ -8,6 +8,7 @@
     "dev": "node --watch bot.js"
   },
   "dependencies": {
+    "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "node-fetch": "^2.7.0",
     "telegraf": "^4.16.3"

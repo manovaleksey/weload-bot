@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages yt-dlp
+RUN pip3 install --break-system-packages --upgrade yt-dlp
 
 WORKDIR /app
 
@@ -20,5 +20,9 @@ COPY bot.js ./
 RUN mkdir -p bin && \
     ln -sf $(which yt-dlp) bin/yt-dlp && \
     ln -sf $(which ffmpeg) bin/ffmpeg
+
+RUN mkdir -p data
+
+ENV DB_PATH=/app/data/weload.db
 
 CMD ["node", "bot.js"]

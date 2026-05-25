@@ -1,5 +1,5 @@
 require('dotenv').config()
-const { Telegraf } = require('telegraf')
+const { Telegraf, Markup } = require('telegraf')
 const { execFile, spawn } = require('child_process')
 const { promisify } = require('util')
 const execFileAsync = promisify(execFile)
@@ -8,11 +8,71 @@ const fs = require('fs')
 const os = require('os')
 const https = require('https')
 const http = require('http')
+const Database = require('better-sqlite3')
 
 const BOT_TOKEN = process.env.BOT_TOKEN
 if (!BOT_TOKEN) { console.error('BOT_TOKEN not set'); process.exit(1) }
 
 const bot = new Telegraf(BOT_TOKEN, { handlerTimeout: 10 * 60 * 1000 })
+
+// ── Database ──────────────────────────────────────────────
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'weload.db')
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true })
+const db = new Database(DB_PATH)
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    free_downloads INTEGER DEFAULT 0,
+    subscribed_until INTEGER DEFAULT 0
+  )
+`)
+
+const FREE_LIMIT = 5
+
+function getUser(userId) {
+  let user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId)
+  if (!user) {
+    db.prepare('INSERT INTO users (user_id) VALUES (?)').run(userId)
+    user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId)
+  }
+  return user
+}
+
+function isSubscribed(user) {
+  return user.subscribed_until > Math.floor(Date.now() / 1000)
+}
+
+function canDownload(user) {
+  return isSubscribed(user) || user.free_downloads < FREE_LIMIT
+}
+
+function incrementDownloads(userId) {
+  db.prepare('UPDATE users SET free_downloads = free_downloads + 1 WHERE user_id = ?').run(userId)
+}
+
+function grantSubscription(userId, days) {
+  const now = Math.floor(Date.now() / 1000)
+  const user = getUser(userId)
+  const currentExpiry = Math.max(user.subscribed_until, now)
+  const newExpiry = currentExpiry + days * 86400
+  db.prepare('UPDATE users SET subscribed_until = ? WHERE user_id = ?').run(newExpiry, userId)
+}
+
+// ── Plans ─────────────────────────────────────────────────
+const PLANS = {
+  month:   { label: '1 месяц',   stars: 299,  days: 30  },
+  half:    { label: '6 месяцев', stars: 799,  days: 180 },
+  year:    { label: '1 год',     stars: 1299, days: 365 },
+}
+
+function plansKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⭐️ 1 месяц — 299 звёзд',   'buy_month')],
+    [Markup.button.callback('⭐️ 6 месяцев — 799 звёзд', 'buy_half')],
+    [Markup.button.callback('⭐️ 1 год — 1 299 звёзд',   'buy_year')],
+  ])
+}
 
 // ── Binaries ──────────────────────────────────────────────
 const IS_WIN  = process.platform === 'win32'
@@ -97,9 +157,42 @@ async function y2metaFetch(url) {
       signal: AbortSignal.timeout(30000), redirect: 'follow',
     })
     const html = await res.text()
+    console.log('y2meta response:', res.status, html.slice(0, 300))
     const mp4 = html.match(/href=["'](https?:\/\/[^"']+\.mp4[^"']{0,200})["']/i)
     return mp4 ? mp4[1].replace(/&amp;/g, '&') : null
-  } catch { return null }
+  } catch (e) {
+    console.log('y2meta error:', e.message)
+    return null
+  }
+}
+
+async function cobaltFetch(url) {
+  try {
+    const res = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'User-Agent': UA,
+      },
+      body: JSON.stringify({ url, videoQuality: '720', filenameStyle: 'basic' }),
+      signal: AbortSignal.timeout(30000),
+    })
+    const text = await res.text()
+    console.log('cobalt response:', res.status, text.slice(0, 300))
+    if (!res.ok) return null
+    const data = JSON.parse(text)
+    if ((data.status === 'redirect' || data.status === 'stream' || data.status === 'tunnel') && data.url) {
+      return data.url
+    }
+    if (data.status === 'picker' && data.picker?.length) {
+      return data.picker[0].url
+    }
+    return null
+  } catch (e) {
+    console.log('cobalt error:', e.message)
+    return null
+  }
 }
 
 // ── Direct download helper ────────────────────────────────
@@ -119,6 +212,12 @@ function downloadFile(fileUrl, savePath) {
 }
 
 // ── yt-dlp download ───────────────────────────────────────
+let cookiesFilePath = null
+if (process.env.YOUTUBE_COOKIES) {
+  cookiesFilePath = path.join(os.tmpdir(), 'yt_cookies.txt')
+  fs.writeFileSync(cookiesFilePath, process.env.YOUTUBE_COOKIES)
+}
+
 function ytdlpDownload(url, outPath) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -127,28 +226,63 @@ function ytdlpDownload(url, outPath) {
       '--merge-output-format', 'mp4',
       '--no-call-home', '--no-check-certificates',
       '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
-      url,
     ]
+    if (cookiesFilePath) args.push('--cookies', cookiesFilePath)
+    args.push(url)
     const proc = spawn(YTDLP, args, { env: buildEnv() })
     let finalPath = outPath
+    let stderr = ''
     proc.stdout.on('data', d => {
       const m = d.toString().match(/\[download\] Destination: (.+)/)
       if (m) finalPath = m[1].trim()
       const mg = d.toString().match(/Merging formats into "(.+)"/)
       if (mg) finalPath = mg[1].trim()
     })
+    proc.stderr.on('data', d => { stderr += d.toString() })
     proc.on('close', code => {
       if (code === 0) resolve(finalPath)
-      else reject(new Error(`yt-dlp exited with code ${code}`))
+      else reject(new Error(`yt-dlp code ${code}: ${stderr.slice(-300)}`))
     })
   })
 }
 
 // ── File size check ───────────────────────────────────────
 const TG_MAX_BYTES = 50 * 1024 * 1024  // 50 MB
+const TRANSFER_MAX_BYTES = 10 * 1024 * 1024 * 1024  // 10 GB
 
 function fileSize(p) {
   try { return fs.statSync(p).size } catch { return 0 }
+}
+
+function uploadToTransfer(filePath) {
+  return new Promise((resolve, reject) => {
+    const fileName = path.basename(filePath)
+    const fileStream = fs.createReadStream(filePath)
+    const stat = fs.statSync(filePath)
+
+    const options = {
+      hostname: 'transfer.sh',
+      path: `/${encodeURIComponent(fileName)}`,
+      method: 'PUT',
+      headers: {
+        'Content-Length': stat.size,
+        'Max-Days': '14',
+      },
+    }
+
+    const req = https.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        const url = data.trim()
+        if (url.startsWith('https://')) resolve(url)
+        else reject(new Error(`transfer.sh вернул: ${url}`))
+      })
+    })
+
+    req.on('error', reject)
+    fileStream.pipe(req)
+  })
 }
 
 // ── Main download logic ───────────────────────────────────
@@ -157,24 +291,31 @@ async function handleUrl(url, statusMsg, ctx) {
   const tmpDir   = os.tmpdir()
   const tmpId    = `weload_${Date.now()}`
 
-  // Pinterest — savepin first, then yt-dlp
+  // Pinterest — savepin first, then cobalt, then yt-dlp
   if (platform === 'pinterest') {
     await statusMsg('⏳ Ищу видео/фото...')
     const fb = await savepinFetch(url)
     if (fb) {
-      const ext  = fb.type === 'video' ? 'mp4' : 'jpg'
-      const out  = path.join(tmpDir, `${tmpId}.${ext}`)
+      const ext = fb.type === 'video' ? 'mp4' : 'jpg'
+      const out = path.join(tmpDir, `${tmpId}.${ext}`)
       await statusMsg('⬇️ Скачиваю...')
       await downloadFile(fb.url, out)
       return { file: out, type: fb.type }
     }
-    // Fallback yt-dlp
+    await statusMsg('⏳ Пробую через cobalt...')
+    const cobaltUrl = await cobaltFetch(url)
+    if (cobaltUrl) {
+      const out = path.join(tmpDir, `${tmpId}.mp4`)
+      await statusMsg('⬇️ Скачиваю...')
+      await downloadFile(cobaltUrl, out)
+      return { file: out, type: 'video' }
+    }
     const out = path.join(tmpDir, `${tmpId}.mp4`)
     const final = await ytdlpDownload(url, out)
     return { file: final, type: 'video' }
   }
 
-  // TikTok — savett first, then yt-dlp
+  // TikTok — savett first, then cobalt, then yt-dlp
   if (platform === 'tiktok') {
     await statusMsg('⏳ Достаю ссылку...')
     const directUrl = await savettFetch(url)
@@ -184,20 +325,12 @@ async function handleUrl(url, statusMsg, ctx) {
       await downloadFile(directUrl, out)
       return { file: out, type: 'video' }
     }
-    await statusMsg('⏳ Пробую через yt-dlp...')
-    const out = path.join(tmpDir, `${tmpId}.mp4`)
-    const final = await ytdlpDownload(url, out)
-    return { file: final, type: 'video' }
-  }
-
-  // YouTube — y2meta first, then yt-dlp
-  if (platform === 'youtube') {
-    await statusMsg('⏳ Ищу видео...')
-    const directUrl = await y2metaFetch(url)
-    if (directUrl) {
+    await statusMsg('⏳ Пробую через cobalt...')
+    const cobaltUrl = await cobaltFetch(url)
+    if (cobaltUrl) {
       const out = path.join(tmpDir, `${tmpId}.mp4`)
       await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(directUrl, out)
+      await downloadFile(cobaltUrl, out)
       return { file: out, type: 'video' }
     }
     await statusMsg('⏳ Пробую через yt-dlp...')
@@ -206,7 +339,47 @@ async function handleUrl(url, statusMsg, ctx) {
     return { file: final, type: 'video' }
   }
 
-  // Instagram, Vimeo, generic — yt-dlp
+  // YouTube — y2meta first, then cobalt, then yt-dlp
+  if (platform === 'youtube') {
+    await statusMsg('⏳ Ищу видео...')
+    const y2url = await y2metaFetch(url)
+    if (y2url) {
+      const out = path.join(tmpDir, `${tmpId}.mp4`)
+      await statusMsg('⬇️ Скачиваю...')
+      await downloadFile(y2url, out)
+      return { file: out, type: 'video' }
+    }
+    await statusMsg('⏳ Пробую через cobalt...')
+    const cobaltUrl = await cobaltFetch(url)
+    if (cobaltUrl) {
+      const out = path.join(tmpDir, `${tmpId}.mp4`)
+      await statusMsg('⬇️ Скачиваю...')
+      await downloadFile(cobaltUrl, out)
+      return { file: out, type: 'video' }
+    }
+    await statusMsg('⏳ Пробую через yt-dlp...')
+    const out = path.join(tmpDir, `${tmpId}.mp4`)
+    const final = await ytdlpDownload(url, out)
+    return { file: final, type: 'video' }
+  }
+
+  // Instagram — cobalt first, then yt-dlp
+  if (platform === 'instagram') {
+    await statusMsg('⏳ Ищу видео...')
+    const cobaltUrl = await cobaltFetch(url)
+    if (cobaltUrl) {
+      const out = path.join(tmpDir, `${tmpId}.mp4`)
+      await statusMsg('⬇️ Скачиваю...')
+      await downloadFile(cobaltUrl, out)
+      return { file: out, type: 'video' }
+    }
+    await statusMsg('⏳ Пробую через yt-dlp...')
+    const out = path.join(tmpDir, `${tmpId}.mp4`)
+    const final = await ytdlpDownload(url, out)
+    return { file: final, type: 'video' }
+  }
+
+  // Vimeo, generic — yt-dlp
   await statusMsg('⏳ Скачиваю...')
   const out = path.join(tmpDir, `${tmpId}.mp4`)
   const final = await ytdlpDownload(url, out)
@@ -247,23 +420,110 @@ bot.catch((err, ctx) => {
   console.error('Bot error for', ctx.updateType, ':', err.message)
 })
 
+const mainKeyboard = Markup.keyboard([
+  ['⚡️ Скачать', '❓ Помощь'],
+]).resize()
+
+function plansKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback('⭐️ 1 месяц — 299 звёзд',   'buy_month')],
+    [Markup.button.callback('⭐️ 6 месяцев — 799 звёзд', 'buy_half')],
+    [Markup.button.callback('⭐️ 1 год — 1 299 звёзд',   'buy_year')],
+  ])
+}
+
 bot.start(ctx => ctx.reply(
   '👋 Привет! Я Weload-бот.\n\n' +
   'Скинь мне ссылку на видео или фото:\n' +
   '• TikTok\n• YouTube\n• Pinterest\n• Instagram\n• Vimeo\n\n' +
-  'И я пришлю файл прямо сюда.'
+  `🆓 Бесплатно: ${FREE_LIMIT} скачиваний. Затем нужна подписка.`,
+  mainKeyboard
 ))
 
 bot.help(ctx => ctx.reply(
   'Просто отправь ссылку — я скачаю и пришлю файл.\n\n' +
-  '⚠️ Файлы до 50 МБ отправляются напрямую.\n' +
-  'Для больших файлов пришлю ссылку на скачивание.'
+  '📦 До 50 МБ — файл придёт прямо в чат.\n' +
+  '📁 До 10 ГБ — пришлю ссылку на скачивание (действует 14 дней).\n\n' +
+  `🆓 Бесплатно: ${FREE_LIMIT} скачиваний\n` +
+  '💫 Безлимит — по подписке через Telegram Stars.',
+  mainKeyboard
 ))
+
+bot.command('status', async (ctx) => {
+  const user = getUser(ctx.from.id)
+  if (isSubscribed(user)) {
+    const exp = new Date(user.subscribed_until * 1000).toLocaleDateString('ru-RU')
+    return ctx.reply(`✅ Подписка активна до ${exp}`, mainKeyboard)
+  }
+  const left = Math.max(0, FREE_LIMIT - user.free_downloads)
+  return ctx.reply(
+    `🆓 Бесплатных скачиваний осталось: ${left} из ${FREE_LIMIT}\n\nДля безлимита оформи подписку:`,
+    plansKeyboard()
+  )
+})
+
+// ── Subscription button handlers ──────────────────────────
+const PLANS = {
+  month: { label: '1 месяц',   stars: 299,  days: 30  },
+  half:  { label: '6 месяцев', stars: 799,  days: 180 },
+  year:  { label: '1 год',     stars: 1299, days: 365 },
+}
+
+for (const [key, plan] of Object.entries(PLANS)) {
+  bot.action(`buy_${key}`, async (ctx) => {
+    await ctx.answerCbQuery()
+    await ctx.replyWithInvoice(
+      `Weload — ${plan.label}`,
+      `Безлимитное скачивание видео на ${plan.label}`,
+      JSON.stringify({ plan: key }),
+      'XTR',
+      [{ label: plan.label, amount: plan.stars }]
+    )
+  })
+}
+
+bot.on('pre_checkout_query', ctx => ctx.answerPreCheckoutQuery(true))
+
+bot.on('message', async (ctx, next) => {
+  if (ctx.message?.successful_payment) {
+    const payload = JSON.parse(ctx.message.successful_payment.invoice_payload)
+    const plan = PLANS[payload.plan]
+    if (plan) {
+      grantSubscription(ctx.from.id, plan.days)
+      return ctx.reply(`✅ Подписка оформлена на ${plan.label}! Скачивай без ограничений.`, mainKeyboard)
+    }
+  }
+  return next()
+})
 
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim()
+
+  if (text === '⚡️ Скачать') {
+    return ctx.reply('Отправь мне ссылку на видео или фото 🔗\n\nПоддерживаю: TikTok, YouTube, Pinterest, Instagram, Vimeo', mainKeyboard)
+  }
+
+  if (text === '❓ Помощь') {
+    return ctx.reply(
+      'Просто отправь ссылку — я скачаю и пришлю файл.\n\n' +
+      '📦 До 50 МБ — файл придёт прямо в чат.\n' +
+      '📁 До 10 ГБ — пришлю ссылку на скачивание (действует 14 дней).\n\n' +
+      `🆓 Бесплатно: ${FREE_LIMIT} скачиваний\n` +
+      '💫 Безлимит — по подписке.',
+      mainKeyboard
+    )
+  }
+
   if (!isUrl(text)) {
-    return ctx.reply('Отправь мне ссылку на видео 🔗')
+    return ctx.reply('Отправь мне ссылку на видео 🔗', mainKeyboard)
+  }
+
+  const user = getUser(ctx.from.id)
+  if (!canDownload(user)) {
+    return ctx.reply(
+      `❌ Бесплатный лимит исчерпан (${FREE_LIMIT} скачиваний).\n\nОформи подписку, чтобы качать без ограничений:`,
+      plansKeyboard()
+    )
   }
 
   const statusMessage = await ctx.reply('⏳ Обрабатываю...')
@@ -279,14 +539,25 @@ bot.on('text', async (ctx) => {
 
     if (size === 0) throw new Error('Файл пустой')
 
-    if (size > TG_MAX_BYTES) {
+    if (size > TRANSFER_MAX_BYTES) {
       await ctx.telegram.deleteMessage(ctx.chat.id, statusMessage.message_id).catch(() => {})
-      return ctx.reply(`⚠️ Файл слишком большой для Telegram (${Math.round(size/1024/1024)} МБ > 50 МБ).\nСкачай вручную по этой ссылке:\n${text}`)
+      return ctx.reply(`⚠️ Файл слишком большой (${Math.round(size/1024/1024/1024)} ГБ). Максимум 10 ГБ.`)
+    }
+
+    if (size > TG_MAX_BYTES) {
+      await editStatus('📤 Файл большой, загружаю на сервер...')
+      const downloadUrl = await uploadToTransfer(filePath)
+      if (!isSubscribed(user)) incrementDownloads(ctx.from.id)
+      await ctx.telegram.deleteMessage(ctx.chat.id, statusMessage.message_id).catch(() => {})
+      return ctx.reply(
+        `✅ Готово! Файл ${Math.round(size/1024/1024)} МБ — скачай по ссылке:\n\n${downloadUrl}\n\n⏳ Ссылка действует 14 дней`
+      )
     }
 
     await editStatus('📤 Отправляю...')
 
     await sendWithRetry(ctx, filePath, result.type)
+    if (!isSubscribed(user)) incrementDownloads(ctx.from.id)
 
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMessage.message_id).catch(() => {})
 
