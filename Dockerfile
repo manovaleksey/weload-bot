@@ -25,5 +25,6 @@ RUN mkdir -p bin && \
 RUN mkdir -p data
 
 ENV DB_PATH=/app/data/weload.db
+ENV BUILD_VER=1.1.0
 
 CMD ["node", "bot.js"]
