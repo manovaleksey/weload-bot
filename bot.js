@@ -579,4 +579,4 @@ bot.launch().catch(err => {
   }
 })
 
-console.log('Weload bot started — @weloadbot_bot')
+console.log('Weload bot started — @weloadbot_bot v1.1.0 with cobalt+sqlite')
