@@ -15,6 +15,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
+ARG CACHEBUST=1
 COPY bot.js ./
 
 RUN mkdir -p bin && \
