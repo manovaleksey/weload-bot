@@ -149,39 +149,39 @@ function extractYoutubeId(url) {
   return m ? m[1] : null
 }
 
-const INVIDIOUS_INSTANCES = [
-  'https://invidious.privacyredirect.com',
-  'https://invidious.nerdvpn.de',
-  'https://invidious.fdn.fr',
-  'https://inv.nadeko.net',
-  'https://invidious.perennialte.ch',
+const PIPED_INSTANCES = [
+  'https://pipedapi.kavin.rocks',
+  'https://piped-api.garudalinux.org',
+  'https://api.piped.projectsegfau.lt',
 ]
 
-async function invidiousFetch(url) {
+async function pipedFetch(url) {
   const videoId = extractYoutubeId(url)
   if (!videoId) return null
 
-  for (const instance of INVIDIOUS_INSTANCES) {
+  for (const instance of PIPED_INSTANCES) {
     try {
-      const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats,formatStreams`, {
+      const res = await fetch(`${instance}/streams/${videoId}`, {
         headers: { 'User-Agent': UA },
         signal: AbortSignal.timeout(15000),
       })
-      if (!res.ok) continue
+      if (!res.ok) { console.log('piped skip:', instance, res.status); continue }
       const data = await res.json()
+      if (data.error) { console.log('piped error:', instance, data.error); continue }
 
-      const streams = [...(data.formatStreams || []), ...(data.adaptiveFormats || [])]
-      const mp4 = streams
-        .filter(f => f.type?.includes('video/mp4') && f.url)
-        .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
-        .find(f => (parseInt(f.quality) || 999) <= 720)
+      const streams = [...(data.videoStreams || []), ...(data.audioStreams || [])]
+      const mp4 = (data.videoStreams || [])
+        .filter(f => f.mimeType?.includes('video/mp4') && f.url && !f.videoOnly)
+        .sort((a, b) => (b.quality || 0) - (a.quality || 0))
+        .find(f => (f.quality || 9999) <= 720)
 
-      if (mp4?.url) {
-        console.log('invidious ok:', instance, mp4.quality)
-        return mp4.url
+      const best = mp4 || (data.videoStreams || []).find(f => f.url)
+      if (best?.url) {
+        console.log('piped ok:', instance, best.quality)
+        return best.url
       }
     } catch (e) {
-      console.log('invidious error:', instance, e.message)
+      console.log('piped error:', instance, e.message)
     }
   }
   return null
@@ -316,10 +316,10 @@ async function handleUrl(url, statusMsg, ctx) {
     return { file: final, type: 'video' }
   }
 
-  // YouTube — invidious → yt-dlp
+  // YouTube — piped → yt-dlp
   if (platform === 'youtube') {
     await statusMsg('⏳ Ищу видео...')
-    const invUrl = await invidiousFetch(url)
+    const invUrl = await pipedFetch(url)
     if (invUrl) {
       const out = path.join(tmpDir, `${tmpId}.mp4`)
       await statusMsg('⬇️ Скачиваю...')
