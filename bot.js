@@ -210,18 +210,23 @@ if (process.env.YOUTUBE_COOKIES) {
   fs.writeFileSync(cookiesFilePath, process.env.YOUTUBE_COOKIES)
 }
 
+function normalizeYoutubeUrl(url) {
+  return url.replace(/youtube\.com\/shorts\/([A-Za-z0-9_-]+)/, 'youtube.com/watch?v=$1')
+}
+
 function ytdlpDownload(url, outPath) {
+  const normalizedUrl = normalizeYoutubeUrl(url)
   return new Promise((resolve, reject) => {
     const args = [
       '--no-playlist', '-o', outPath,
       '--ffmpeg-location', FFMPEG,
       '--merge-output-format', 'mp4',
       '--no-call-home', '--no-check-certificates',
-      '--extractor-args', 'youtube:player_client=ios,mweb,default',
-      '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+      '--extractor-args', 'youtube:player_client=ios',
+      '-f', 'bv[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv[height<=720]+ba/b[height<=720]/b',
     ]
     if (cookiesFilePath) args.push('--cookies', cookiesFilePath)
-    args.push(url)
+    args.push(normalizedUrl)
     const proc = spawn(YTDLP, args, { env: buildEnv() })
     let finalPath = outPath
     let stderr = ''
