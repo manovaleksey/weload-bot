@@ -151,8 +151,10 @@ function extractYoutubeId(url) {
 
 const INVIDIOUS_INSTANCES = [
   'https://invidious.privacyredirect.com',
-  'https://iv.datura.network',
   'https://invidious.nerdvpn.de',
+  'https://invidious.fdn.fr',
+  'https://inv.nadeko.net',
+  'https://invidious.perennialte.ch',
 ]
 
 async function invidiousFetch(url) {
@@ -215,6 +217,7 @@ function ytdlpDownload(url, outPath) {
       '--ffmpeg-location', FFMPEG,
       '--merge-output-format', 'mp4',
       '--no-call-home', '--no-check-certificates',
+      '--extractor-args', 'youtube:player_client=ios,mweb,default',
       '-f', 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best',
     ]
     if (cookiesFilePath) args.push('--cookies', cookiesFilePath)
