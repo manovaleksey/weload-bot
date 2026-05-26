@@ -149,40 +149,40 @@ function extractYoutubeId(url) {
   return m ? m[1] : null
 }
 
-const PIPED_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://piped-api.garudalinux.org',
-  'https://api.piped.projectsegfau.lt',
-]
-
-async function pipedFetch(url) {
+async function innertubeFetch(url) {
   const videoId = extractYoutubeId(url)
   if (!videoId) return null
-
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      const res = await fetch(`${instance}/streams/${videoId}`, {
-        headers: { 'User-Agent': UA },
-        signal: AbortSignal.timeout(15000),
-      })
-      if (!res.ok) { console.log('piped skip:', instance, res.status); continue }
-      const data = await res.json()
-      if (data.error) { console.log('piped error:', instance, data.error); continue }
-
-      const streams = [...(data.videoStreams || []), ...(data.audioStreams || [])]
-      const mp4 = (data.videoStreams || [])
-        .filter(f => f.mimeType?.includes('video/mp4') && f.url && !f.videoOnly)
-        .sort((a, b) => (b.quality || 0) - (a.quality || 0))
-        .find(f => (f.quality || 9999) <= 720)
-
-      const best = mp4 || (data.videoStreams || []).find(f => f.url)
-      if (best?.url) {
-        console.log('piped ok:', instance, best.quality)
-        return best.url
-      }
-    } catch (e) {
-      console.log('piped error:', instance, e.message)
+  try {
+    const res = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_5 like Mac OS X)',
+        'X-Youtube-Client-Name': '5',
+        'X-Youtube-Client-Version': '19.09.3',
+      },
+      body: JSON.stringify({
+        videoId,
+        context: { client: { clientName: 'IOS', clientVersion: '19.09.3', deviceModel: 'iPhone16,2', hl: 'en', gl: 'US' } },
+      }),
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) { console.log('innertube skip:', res.status); return null }
+    const data = await res.json()
+    if (data?.playabilityStatus?.status !== 'OK') {
+      console.log('innertube not ok:', data?.playabilityStatus?.status)
+      return null
     }
+    const formats = data?.streamingData?.formats || []
+    const adaptive = data?.streamingData?.adaptiveFormats || []
+    const all = [...formats, ...adaptive]
+    const mp4 = all
+      .filter(f => f.mimeType?.includes('video/mp4') && f.url && f.height)
+      .sort((a, b) => b.height - a.height)
+      .find(f => f.height <= 720)
+    if (mp4?.url) { console.log('innertube ok:', mp4.height + 'p'); return mp4.url }
+  } catch (e) {
+    console.log('innertube error:', e.message)
   }
   return null
 }
@@ -316,10 +316,10 @@ async function handleUrl(url, statusMsg, ctx) {
     return { file: final, type: 'video' }
   }
 
-  // YouTube — piped → yt-dlp
+  // YouTube — innertube (iOS API) → yt-dlp
   if (platform === 'youtube') {
     await statusMsg('⏳ Ищу видео...')
-    const invUrl = await pipedFetch(url)
+    const invUrl = await innertubeFetch(url)
     if (invUrl) {
       const out = path.join(tmpDir, `${tmpId}.mp4`)
       await statusMsg('⬇️ Скачиваю...')
