@@ -463,12 +463,6 @@ bot.command('status', async (ctx) => {
 })
 
 // ── Subscription button handlers ──────────────────────────
-const PLANS = {
-  month: { label: '1 месяц',   stars: 299,  days: 30  },
-  half:  { label: '6 месяцев', stars: 799,  days: 180 },
-  year:  { label: '1 год',     stars: 1299, days: 365 },
-}
-
 for (const [key, plan] of Object.entries(PLANS)) {
   bot.action(`buy_${key}`, async (ctx) => {
     await ctx.answerCbQuery()
