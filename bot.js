@@ -222,7 +222,7 @@ function ytdlpDownload(url, outPath) {
       '--ffmpeg-location', FFMPEG,
       '--merge-output-format', 'mp4',
       '--no-call-home', '--no-check-certificates',
-      '--extractor-args', 'youtube:player_client=web,default',
+      '--extractor-args', 'youtube:player_client=android,mediaconnect,default',
       '-f', 'bv[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/bv[height<=720]+ba/b[height<=720]/b',
     ]
     if (cookiesFilePath) args.push('--cookies', cookiesFilePath)
