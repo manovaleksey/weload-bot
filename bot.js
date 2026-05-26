@@ -144,55 +144,45 @@ async function savettFetch(url) {
   } catch { return null }
 }
 
-async function y2metaFetch(url) {
-  try {
-    const res = await fetch('https://y2meta.co.com/search/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://y2meta.co.com/en/youtube-to-mp4/',
-        'User-Agent': UA, 'Origin': 'https://y2meta.co.com',
-      },
-      body: `query=${encodeURIComponent(url)}`,
-      signal: AbortSignal.timeout(30000), redirect: 'follow',
-    })
-    const html = await res.text()
-    console.log('y2meta response:', res.status, html.slice(0, 300))
-    const mp4 = html.match(/href=["'](https?:\/\/[^"']+\.mp4[^"']{0,200})["']/i)
-    return mp4 ? mp4[1].replace(/&amp;/g, '&') : null
-  } catch (e) {
-    console.log('y2meta error:', e.message)
-    return null
-  }
+function extractYoutubeId(url) {
+  const m = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([A-Za-z0-9_-]{11})/)
+  return m ? m[1] : null
 }
 
-async function cobaltFetch(url) {
-  try {
-    const res = await fetch('https://api.cobalt.tools/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': UA,
-      },
-      body: JSON.stringify({ url, videoQuality: '720', filenameStyle: 'basic' }),
-      signal: AbortSignal.timeout(30000),
-    })
-    const text = await res.text()
-    console.log('cobalt response:', res.status, text.slice(0, 300))
-    if (!res.ok) return null
-    const data = JSON.parse(text)
-    if ((data.status === 'redirect' || data.status === 'stream' || data.status === 'tunnel') && data.url) {
-      return data.url
+const INVIDIOUS_INSTANCES = [
+  'https://invidious.privacyredirect.com',
+  'https://iv.datura.network',
+  'https://invidious.nerdvpn.de',
+]
+
+async function invidiousFetch(url) {
+  const videoId = extractYoutubeId(url)
+  if (!videoId) return null
+
+  for (const instance of INVIDIOUS_INSTANCES) {
+    try {
+      const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=adaptiveFormats,formatStreams`, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (!res.ok) continue
+      const data = await res.json()
+
+      const streams = [...(data.formatStreams || []), ...(data.adaptiveFormats || [])]
+      const mp4 = streams
+        .filter(f => f.type?.includes('video/mp4') && f.url)
+        .sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0))
+        .find(f => (parseInt(f.quality) || 999) <= 720)
+
+      if (mp4?.url) {
+        console.log('invidious ok:', instance, mp4.quality)
+        return mp4.url
+      }
+    } catch (e) {
+      console.log('invidious error:', instance, e.message)
     }
-    if (data.status === 'picker' && data.picker?.length) {
-      return data.picker[0].url
-    }
-    return null
-  } catch (e) {
-    console.log('cobalt error:', e.message)
-    return null
   }
+  return null
 }
 
 // ── Direct download helper ────────────────────────────────
@@ -291,7 +281,7 @@ async function handleUrl(url, statusMsg, ctx) {
   const tmpDir   = os.tmpdir()
   const tmpId    = `weload_${Date.now()}`
 
-  // Pinterest — savepin first, then cobalt, then yt-dlp
+  // Pinterest — savepin → yt-dlp
   if (platform === 'pinterest') {
     await statusMsg('⏳ Ищу видео/фото...')
     const fb = await savepinFetch(url)
@@ -302,20 +292,12 @@ async function handleUrl(url, statusMsg, ctx) {
       await downloadFile(fb.url, out)
       return { file: out, type: fb.type }
     }
-    await statusMsg('⏳ Пробую через cobalt...')
-    const cobaltUrl = await cobaltFetch(url)
-    if (cobaltUrl) {
-      const out = path.join(tmpDir, `${tmpId}.mp4`)
-      await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(cobaltUrl, out)
-      return { file: out, type: 'video' }
-    }
     const out = path.join(tmpDir, `${tmpId}.mp4`)
     const final = await ytdlpDownload(url, out)
     return { file: final, type: 'video' }
   }
 
-  // TikTok — savett first, then cobalt, then yt-dlp
+  // TikTok — savett → yt-dlp
   if (platform === 'tiktok') {
     await statusMsg('⏳ Достаю ссылку...')
     const directUrl = await savettFetch(url)
@@ -325,36 +307,20 @@ async function handleUrl(url, statusMsg, ctx) {
       await downloadFile(directUrl, out)
       return { file: out, type: 'video' }
     }
-    await statusMsg('⏳ Пробую через cobalt...')
-    const cobaltUrl = await cobaltFetch(url)
-    if (cobaltUrl) {
-      const out = path.join(tmpDir, `${tmpId}.mp4`)
-      await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(cobaltUrl, out)
-      return { file: out, type: 'video' }
-    }
     await statusMsg('⏳ Пробую через yt-dlp...')
     const out = path.join(tmpDir, `${tmpId}.mp4`)
     const final = await ytdlpDownload(url, out)
     return { file: final, type: 'video' }
   }
 
-  // YouTube — y2meta first, then cobalt, then yt-dlp
+  // YouTube — invidious → yt-dlp
   if (platform === 'youtube') {
     await statusMsg('⏳ Ищу видео...')
-    const y2url = await y2metaFetch(url)
-    if (y2url) {
+    const invUrl = await invidiousFetch(url)
+    if (invUrl) {
       const out = path.join(tmpDir, `${tmpId}.mp4`)
       await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(y2url, out)
-      return { file: out, type: 'video' }
-    }
-    await statusMsg('⏳ Пробую через cobalt...')
-    const cobaltUrl = await cobaltFetch(url)
-    if (cobaltUrl) {
-      const out = path.join(tmpDir, `${tmpId}.mp4`)
-      await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(cobaltUrl, out)
+      await downloadFile(invUrl, out)
       return { file: out, type: 'video' }
     }
     await statusMsg('⏳ Пробую через yt-dlp...')
@@ -363,23 +329,7 @@ async function handleUrl(url, statusMsg, ctx) {
     return { file: final, type: 'video' }
   }
 
-  // Instagram — cobalt first, then yt-dlp
-  if (platform === 'instagram') {
-    await statusMsg('⏳ Ищу видео...')
-    const cobaltUrl = await cobaltFetch(url)
-    if (cobaltUrl) {
-      const out = path.join(tmpDir, `${tmpId}.mp4`)
-      await statusMsg('⬇️ Скачиваю...')
-      await downloadFile(cobaltUrl, out)
-      return { file: out, type: 'video' }
-    }
-    await statusMsg('⏳ Пробую через yt-dlp...')
-    const out = path.join(tmpDir, `${tmpId}.mp4`)
-    const final = await ytdlpDownload(url, out)
-    return { file: final, type: 'video' }
-  }
-
-  // Vimeo, generic — yt-dlp
+  // Instagram, Vimeo, generic — yt-dlp
   await statusMsg('⏳ Скачиваю...')
   const out = path.join(tmpDir, `${tmpId}.mp4`)
   const final = await ytdlpDownload(url, out)
